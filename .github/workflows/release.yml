@@ -80,76 +80,8 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-  android:
-    needs: metadata
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        flavor: [phone, tv]
-    env:
-      ANDROID_FLAVOR: ${{ matrix.flavor }}
-      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
-      RELEASE_BUILD_NUMBER: ${{ needs.metadata.outputs.build_number }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Restore Android signing key
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: node tool/release.cjs restore-keystore "$RUNNER_TEMP/minireel-release.jks"
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
-        with:
-          # The legacy "tools" package in the action's defaults is unavailable.
-          packages: 'platform-tools'
-      - name: Install Android build tools
-        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-      - run: flutter pub get --enforce-lockfile
-      - name: Build and verify signed APKs
-        env:
-          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/minireel-release.jks
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          flutter build apk --release --flavor "$ANDROID_FLAVOR" --split-per-abi --build-name "$RELEASE_VERSION" --build-number "$RELEASE_BUILD_NUMBER"
-          keytool -exportcert -keystore "$ANDROID_KEYSTORE_PATH" -alias "$ANDROID_KEY_ALIAS" -storepass:env ANDROID_KEYSTORE_PASSWORD -file "$RUNNER_TEMP/minireel-signing.der"
-          expected_cert=$(sha256sum "$RUNNER_TEMP/minireel-signing.der" | cut -d ' ' -f 1)
-          for abi in arm64-v8a armeabi-v7a x86_64; do
-            apk="build/app/outputs/flutter-apk/app-${abi}-${ANDROID_FLAVOR}-release.apk"
-            test -s "$apk" || { echo "Missing APK: $apk"; ls -l build/app/outputs/flutter-apk; exit 1; }
-            cert=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
-            test "$cert" = "$expected_cert" || { echo "Signing certificate mismatch: $ANDROID_FLAVOR/$abi"; exit 1; }
-          done
-          node tool/release.cjs collect-apks "$RELEASE_VERSION" build/app/outputs/flutter-apk output/release "$ANDROID_FLAVOR"
-      - name: Remove temporary signing material
-        if: always()
-        run: rm -f -- "$RUNNER_TEMP/minireel-release.jks" "$RUNNER_TEMP/minireel-signing.der"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: release-android-${{ matrix.flavor }}
-          path: output/release/*.apk
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-
   publish:
-    needs: [metadata, windows, android]
+    needs: [metadata, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -166,17 +98,14 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: release-*
-          merge-multiple: true
+          name: release-windows
           path: release
-      - name: Verify assets and create checksums
-        run: node tool/release.cjs checksums "$RELEASE_VERSION" release
-      - name: Publish GitHub Release
+      - name: Publish GitHub Release (Windows only)
         run: |
           if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             test "$draft" = true || { echo 'This release is already published. Use a new version tag.'; exit 1; }
           else
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "MiniReel $RELEASE_VERSION" --generate-notes --prerelease="$RELEASE_PRERELEASE"
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "MiniReel $RELEASE_VERSION (Windows)" --generate-notes --prerelease="$RELEASE_PRERELEASE"
           fi
           gh release upload "$RELEASE_TAG" release/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease="$RELEASE_PRERELEASE"
